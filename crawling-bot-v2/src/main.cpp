@@ -323,7 +323,7 @@ void setup()
     display.refresh();
     delay(1000);
 
-    ahrs.calibrateAccelGyro();
+    ahrs.calibrate();
     // ahrs.calibrateMag();
 
    
@@ -359,7 +359,7 @@ void setup()
 
     healthCheck.run();
 
-    ahrs.resetMeasurement();
+    // ahrs.resetMeasurement();
 
     display.clear();
     display.print("Run Mode", 0, 0);
