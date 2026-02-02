@@ -1188,22 +1188,26 @@ void Training::startTraining()
     trainingActive = true;
     modelLoaded = false;
 
-    // State is based on current servo angles.
-    State s = getStateFromAngles(leftServo->getCurrentUpAngle(), rightServo->getCurrentDownAngle());
+    State s = getStateFromAngles(leftServo->getCurrentUpAngle(),
+                                 rightServo->getCurrentDownAngle());
 
-    const uint32_t MAX_STEPS = 800;
-    const uint32_t MEASURE_MS = 280;
-    const uint32_t STALE_LIMIT = 120;
+    const uint32_t MAX_STEPS   = 1200;
+    const uint32_t MEASURE_MS  = 900;   // مهم: بزرگ‌تر از قبل
+    const uint32_t STALE_LIMIT = 200;
+
+    const float alpha = 0.10f;
+    const float gamma = 0.90f;
+
     uint32_t staleCount = 0;
 
     for (uint32_t step = 0; trainingActive && step < MAX_STEPS; ++step)
     {
-        // Measure displacement during this action window.
         ahrs->resetPosition();
 
         Action a = selectAction(s);
         executeAction(a);
 
+        // پنجره اندازه گیری: در تمام مدت update انجام میشه
         uint32_t t0 = millis();
         while (millis() - t0 < MEASURE_MS)
         {
@@ -1211,25 +1215,38 @@ void Training::startTraining()
             delay(5);
         }
 
-        // Forward displacement (meters). Assumes AHRS X axis is forward.
-        float deltaForward = ahrs->getPositionX();
+        float deltaForward = ahrs->getPositionX(); // فرض: X رو به جلو
         float r = calculateReward(deltaForward);
 
-        State s_next = getStateFromAngles(leftServo->getCurrentUpAngle(), rightServo->getCurrentDownAngle());
+        State s_next = getStateFromAngles(leftServo->getCurrentUpAngle(),
+                                          rightServo->getCurrentDownAngle());
+
+        // maxQ_next قبل از updateQ
+        float maxQ_next = Q_table[s_next.left][s_next.right][0];
+        for (int act = 1; act < NUM_ACTIONS; ++act)
+            if (Q_table[s_next.left][s_next.right][act] > maxQ_next)
+                maxQ_next = Q_table[s_next.left][s_next.right][act];
+
+        float qsa_before = Q_table[s.left][s.right][(int)a];
+        float td_error = (r + gamma * maxQ_next - qsa_before);
+
         updateQ(s, a, r, s_next);
 
-        // Simple convergence / early stop: stop if updates are consistently tiny.
-        // (We approximate this by checking the TD-error magnitude.)
-        float maxQ_next = Q_table[s_next.left][s_next.right][0];
-        for (int action = 1; action < NUM_ACTIONS; ++action)
-            if (Q_table[s_next.left][s_next.right][action] > maxQ_next)
-                maxQ_next = Q_table[s_next.left][s_next.right][action];
-
-        float td = (r + 0.9f * maxQ_next - Q_table[s.left][s.right][(int)a]);
-        if (fabsf(0.1f * td) < 0.001f)
+        // stale detection درست
+        if (fabsf(alpha * td_error) < 0.0005f)
             staleCount++;
         else
             staleCount = 0;
+
+        // لاگ خیلی کمک می‌کنه بفهمیم واقعاً حرکت دیده میشه یا نه
+        Serial.print("step=");
+        Serial.print(step);
+        Serial.print(" dx=");
+        Serial.print(deltaForward, 6);
+        Serial.print(" r=");
+        Serial.print(r, 3);
+        Serial.print(" a=");
+        Serial.println((int)a);
 
         if (staleCount >= STALE_LIMIT)
         {
@@ -1239,13 +1256,13 @@ void Training::startTraining()
         }
 
         s = s_next;
-        delay(1);
+        delay(2);
     }
 
-    // If we exit the loop naturally, mark training as done.
     if (trainingActive)
         stopTraining();
 }
+
 
 void Training::stopTraining()
 {
@@ -1261,24 +1278,35 @@ bool Training::isTraining()
 
 void Training::executeLearnedBehavior()
 {
-    if (!leftServo || !rightServo)
-        return;
+    if (!leftServo || !rightServo) return;
+    if (!modelLoaded) return;
 
-    State s = getStateFromAngles(leftServo->getCurrentUpAngle(), rightServo->getCurrentDownAngle());
+    State s = getStateFromAngles(leftServo->getCurrentUpAngle(),
+                                 rightServo->getCurrentDownAngle());
 
-    float bestQ = Q_table[s.left][s.right][0];
     Action best = (Action)0;
-    for (int a = 1; a < NUM_ACTIONS; a++)
+    float bestQ = Q_table[s.left][s.right][0];
+
+    for (int a = 1; a < NUM_ACTIONS; ++a)
     {
-        if (Q_table[s.left][s.right][a] > bestQ)
+        float q = Q_table[s.left][s.right][a];
+
+        if (q > bestQ + 1e-6f)
         {
-            bestQ = Q_table[s.left][s.right][a];
+            bestQ = q;
             best = (Action)a;
+        }
+        else if (fabsf(q - bestQ) <= 1e-6f)
+        {
+            // tie-break رندوم
+            if (random(2) == 0)
+                best = (Action)a;
         }
     }
 
     executeAction(best);
 }
+
 
 bool Training::hasLearnedBehavior()
 {
@@ -1324,16 +1352,21 @@ Training::State Training::getStateFromAngles(int leftAngle, int rightAngle)
 
 float Training::calculateReward(float deltaForwardMeters)
 {
-    // NOTE: These thresholds are in meters. Tune for your robot.
-    const float forward_th = 0.05f;   // 5cm forward
-    const float backward_th = -0.02f; // 2cm backward
+    // // NOTE: These thresholds are in meters. Tune for your robot.
+    // const float forward_th = 0.05f;   // 5cm forward
+    // const float backward_th = -0.02f; // 2cm backward
 
-    if (deltaForwardMeters > forward_th)
-        return +1.0f;
-    else if (deltaForwardMeters < backward_th)
-        return -1.0f;
-    else
-        return -0.2f;
+    // if (deltaForwardMeters > forward_th)
+    //     return +1.0f;
+    // else if (deltaForwardMeters < backward_th)
+    //     return -1.0f;
+    // else
+    //     return -0.2f;
+    float r = deltaForwardMeters * 20.0f;   // هر 5cm ~ +1
+    r = constrain(r, -1.0f, 1.0f);
+    if (fabs(deltaForwardMeters) < 0.002f) r -= 0.05f; // تنبیه سکون
+    return r;
+
 }
 
 Training::Action Training::selectAction(State s)
@@ -1391,7 +1424,7 @@ void Training::executeAction(Action a)
     leftServo->moveUpSmooth(up);
     rightServo->moveDownSmooth(down);
 
-    delay(200);
+    // delay(200);
 }
 
 void Training::updateQ(State s, Action a, float r, State s_next)
