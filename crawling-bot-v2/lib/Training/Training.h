@@ -55,7 +55,9 @@ public:
     int discretizeAngle(int angle);
 
     //reward
-    float calculateReward(const AHRS::MovementSnapshot& m);
+    // Reward is calculated from the measured forward displacement (meters)
+    // measured by AHRS during the action window.
+    float calculateReward(float deltaForwardMeters);
 
     //q-table
     Action selectAction(State s);
