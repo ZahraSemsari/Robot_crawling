@@ -1188,6 +1188,12 @@ void Training::startTraining()
     trainingActive = true;
     modelLoaded = false;
 
+    // قبل از گرفتن s
+    leftServo->setTestPosition();   // 90/90
+    rightServo->setTestPosition();
+    delay(300);  // فقط همین یکبار برای رسیدن سرووها
+
+
     State s = getStateFromAngles(leftServo->getCurrentUpAngle(),
                                  rightServo->getCurrentDownAngle());
 
@@ -1238,7 +1244,6 @@ void Training::startTraining()
         else
             staleCount = 0;
 
-        // لاگ خیلی کمک می‌کنه بفهمیم واقعاً حرکت دیده میشه یا نه
         Serial.print("step=");
         Serial.print(step);
         Serial.print(" dx=");
@@ -1371,60 +1376,57 @@ float Training::calculateReward(float deltaForwardMeters)
 
 Training::Action Training::selectAction(State s)
 {
-    const float epsilon = 0.10f;
-    if (random(100) < (uint32_t)(epsilon * 100.0f))
+    // Exploration بیشتر در شروع کار
+    const float epsilon = 0.30f;  // قبلاً 0.10 بود
+
+    if (random(1000) < (uint32_t)(epsilon * 1000.0f))
         return (Action)random(NUM_ACTIONS);
 
+    // Greedy با tie-break: اگر چند اکشن Q مساوی دارن، رندوم یکی رو انتخاب کن
     float maxQ = Q_table[s.left][s.right][0];
-    Action best = (Action)0;
-    for (int a = 1; a < NUM_ACTIONS; a++)
+    int bestIdx[NUM_ACTIONS];
+    int bestCount = 0;
+
+    for (int a = 0; a < NUM_ACTIONS; ++a)
     {
-        if (Q_table[s.left][s.right][a] > maxQ)
+        float q = Q_table[s.left][s.right][a];
+        if (q > maxQ + 1e-6f)
         {
-            maxQ = Q_table[s.left][s.right][a];
-            best = (Action)a;
+            maxQ = q;
+            bestCount = 0;
+            bestIdx[bestCount++] = a;
+        }
+        else if (fabsf(q - maxQ) <= 1e-6f)
+        {
+            bestIdx[bestCount++] = a;
         }
     }
-    return best;
+
+    return (Action)bestIdx[random(bestCount)];
 }
 
 void Training::executeAction(Action a)
 {
-    if (!leftServo || !rightServo)
-        return;
+    const int STEP_ANGLE = 25;        // کمی بیشتر از 20
+    const int MIN_ANG = 40;           // جلوگیری از گیرکردن در انتها
+    const int MAX_ANG = 140;
 
-    const int STEP_ANGLE = 20;
-
-    int up = leftServo->getCurrentUpAngle();
+    int up   = leftServo->getCurrentUpAngle();
     int down = rightServo->getCurrentDownAngle();
 
     switch (a)
     {
-    case BOTH_UP:
-        up += STEP_ANGLE;
-        down += STEP_ANGLE;
-        break;
-    case BOTH_DOWN:
-        up -= STEP_ANGLE;
-        down -= STEP_ANGLE;
-        break;
-    case LEFT_UP_RIGHT_DOWN:
-        up += STEP_ANGLE;
-        down -= STEP_ANGLE;
-        break;
-    case LEFT_DOWN_RIGHT_UP:
-        up -= STEP_ANGLE;
-        down += STEP_ANGLE;
-        break;
+        case BOTH_UP:               up += STEP_ANGLE; down += STEP_ANGLE; break;
+        case BOTH_DOWN:             up -= STEP_ANGLE; down -= STEP_ANGLE; break;
+        case LEFT_UP_RIGHT_DOWN:    up += STEP_ANGLE; down -= STEP_ANGLE; break;
+        case LEFT_DOWN_RIGHT_UP:    up -= STEP_ANGLE; down += STEP_ANGLE; break;
     }
 
-    up = constrain(up, 0, 180);
-    down = constrain(down, 0, 180);
+    up   = constrain(up,   MIN_ANG, MAX_ANG);
+    down = constrain(down, MIN_ANG, MAX_ANG);
 
-    leftServo->moveUpSmooth(up);
-    rightServo->moveDownSmooth(down);
-
-    // delay(200);
+    leftServo->moveUp(up);
+    rightServo->moveDown(down);
 }
 
 void Training::updateQ(State s, Action a, float r, State s_next)
